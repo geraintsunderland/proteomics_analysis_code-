@@ -1,0 +1,675 @@
+---
+title: "Meningitis_proteomics_Rcode"
+author: "Geraint Sunderland"
+date: "`r format(Sys.time(), '%d/%m/%Y')`"
+output: pdf_document
+keep_md: yes
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(root.dir = '/Users/gjs12782/iCloudDrive/PhD/Oxford proteomics/Data_Analysis/Analysis_tidy/Meningitis_practice/')
+knitr::opts_chunk$set(dev = "jpeg",
+                      dpi = 300,
+                      echo = TRUE,
+                      eval = TRUE,
+                      message = FALSE,
+                      warning = FALSE,
+                      cache = TRUE)
+knitr::write_bib(c(.packages(), "bookdown"), "packages.bib")
+```
+
+```{r}
+
+library(EnsDb.Hsapiens.v79)
+library(tidyverse)
+library(org.Hs.eg.db)
+library(preprocessCore)
+library(cluster)
+library(factoextra)
+library(gplots)
+library(ggplot2)
+library(RColorBrewer)
+library(ggrepel)
+library(edgeR)
+library(limma)
+library(qvalue)
+library(effsize)
+library(tmaptools)
+library(pheatmap)
+library(reshape2)
+library(biomaRt)
+library(clusterProfiler)
+library(vsn)
+library(e1071)
+library(EnhancedVolcano)
+library(enrichplot)
+library(pROC)
+
+```
+
+
+```{r}
+meningitis_data <- read.csv('meningitis_data_final.csv')
+
+```
+
+```{r}
+Group <- as.data.frame(cbind(c(rep(1, 16), rep(2, 16)), c(rep('BM', 16), rep('NAD', 16))))
+colnames(Group)<-c('Group', 'BM_NAD')
+
+```
+
+
+```{r}
+
+meningitis_data1 <- meningitis_data[,3:ncol(meningitis_data)]
+rownames(meningitis_data1)<- paste(meningitis_data[,2])
+                 
+tmeningitis_data1 <- t(meningitis_data1)
+
+
+tmeningitis_master_data <- as.data.frame(t(meningitis_data[,3:ncol(meningitis_data)]))
+colnames(tmeningitis_master_data)<- t(meningitis_data[,2])
+
+
+tmeningitis_master_data1<-lapply(tmeningitis_master_data,as.numeric)
+tmeningitis_master_data1 <- (cbind(Group, tmeningitis_master_data))
+```
+
+Plot meanSD and boxplot check the distribution of abundance values and any dependence of the standard deviation with the mean
+
+```{r unnormalised_meanSDplot}
+
+meningitis_data_mat <- as.matrix(meningitis_data[,4:ncol(meningitis_data)])
+
+meanSdPlot(meningitis_data_mat)
+
+```
+
+
+```{r unnormalised_boxplot}
+boxplot_cols <- c(rep("#F46D43",16), rep("#74ADD1", 16))
+
+boxplot(t(tmeningitis_data1), main = "Unnormalised", outline = FALSE, col = boxplot_cols)
+legend("topleft", legend=c("BM", "NAD"),fill=c("#F46D43", "#74ADD1"))
+
+```
+
+Normalise with vsn (Variance Stabilising Normalisation)
+
+```{r vsn_normalised_meanSDplot}
+meningitis_norm.data1 <- t(justvsn(as.matrix(meningitis_data1)))
+log_meningitis <- t(log2(meningitis_data_mat))
+
+meanSdPlot(t(meningitis_norm.data1))
+meanSdPlot(t(log_meningitis))
+```
+      
+```{r vsn_normalised_boxplot}
+boxplot(t(meningitis_norm.data1), main = "Normalised", outline=FALSE, col = boxplot_cols)
+legend("topleft", legend=c("BM", "NAD"),fill=c("#F46D43", "#74ADD1"))
+
+boxplot(t(log_meningitis), main = "Log2 Normalised", outline=FALSE, col = boxplot_cols)
+legend("topleft", legend=c("BM", "NAD"),fill=c("#F46D43", "#74ADD1"))
+
+```
+
+Exploratory analysis
+1. PCA
+
+```{r }
+meningitis_data1_PCA <- prcomp(as.matrix(tmeningitis_master_data1[,3:ncol(tmeningitis_master_data1)]), center = T, scale. = F)
+```
+
+Assess variation per principal component
+
+```{r }
+meningitis_data1_varExplained <- summary(meningitis_data1_PCA)$importance[2,]*100
+
+meningitis_data1_varExplained
+```
+
+```{r }
+meningitis_data1PCA_score1_2 <- as.data.frame(meningitis_data1_PCA$x[,1:2])
+```
+
+Plot PCA:
+
+```{r meningitis_PCA}
+library(ggplot2)
+ggplot(meningitis_data1PCA_score1_2,aes(x=PC1,y=PC2))+
+  geom_point(size=3,aes(col=tmeningitis_master_data1$Group))+#attaches the case type Infected/Clean
+  scale_color_manual(values = c("1" = "#F46D43", "2" = "#74ADD1"), labels=c("BM", "NAD"), name = "Group")+ 
+  xlab(paste("PC1 ","(",meningitis_data1_varExplained[1],"%)",sep=""))+
+  ylab(paste("PC2 ","(",meningitis_data1_varExplained[2],"%)",sep=""))+
+  theme(legend.position = "right")
+```
+
+Can look to see what genes/peptides are contributing to the loadings of the PCs using a loadings plot
+
+```{r meningitis_PCA_loadings}
+meningitis_data1_loadings1_2 <- as.data.frame(meningitis_data1_PCA$rotation[, 1:2])
+
+ggplot(meningitis_data1_loadings1_2,aes(x=PC1,y=PC2))+
+  geom_text(aes(x=PC1,y=PC2),label=rownames(meningitis_data1_loadings1_2), size=3)+
+  xlab("Loadings of PC1")+
+  ylab("Loadings of PC2")+
+  theme_bw(base_size = 12)
+```
+
+# Heatmap/cluster analysis
+
+Use elbow plot analysis to indicate how many clusters to explore
+
+```{r meningitis_elbow}
+wss <- (nrow(meningitis_norm.data1) - 1) * sum(apply(meningitis_norm.data1, 2, var))
+for (i in 2:20) wss[i] <- sum(kmeans(meningitis_norm.data1, centers = i)$withinss)
+
+plot(1:20, wss, type = "b", xlab = "Number of Clusters", ylab = "Within groups sum of squares")
+```
+
+Alternate method:
+
+```{r meningitis_elbow2}
+KmeansResult <- kmeans(x = meningitis_norm.data1, centers = 2)
+
+fviz_nbclust(meningitis_norm.data1, kmeans, method = "wss") +
+  geom_vline(xintercept = 2, linetype = 2)
+```
+
+```{r menigitis_silhouette}
+fviz_nbclust(meningitis_norm.data1, kmeans, method = "silhouette")
+```
+
+#kmeans cluster
+
+```{r meningitis_kmeans_cluster}
+final <- kmeans(meningitis_norm.data1, 2, nstart = 25)
+fviz_cluster(final, data = meningitis_norm.data1, labelsize = 1)+
+  scale_fill_manual(name = "",
+                    labels = c("Cluster 1", "Cluster 2"),
+                     values = c("#F46D43", "#74ADD1"))+
+  scale_shape_manual(name = "",
+                     labels = c("Cluster 1", "Cluster 2"),
+                     values = c(16, 16))+
+  scale_color_manual(name = "",
+                     labels = c("Cluster 1", "Cluster 2"),
+                     values = c("#F46D43", "#74ADD1"))+
+  ggtitle("")
+```
+
+Hierarchical clustering heatmaps
+
+
+```{r meningitis_2way_cluster}
+
+hr <- hclust(as.dist(1-cor(meningitis_norm.data1, method = "pearson")), method = "average")
+hc <- hclust(as.dist(1-cor(t(meningitis_norm.data1), method = "pearson")), method = "average")
+mycl <- cutree(hr, h = max(hr$height)/1.008) 
+
+mycolhc <- rainbow(length(unique(mycl)), start = 0.1, end = 0.9); mycolhc  <- mycolhc[as.vector(mycl)]
+
+mycol <- colorpanel(30, "#4575B4", "grey95", "#D73027")
+
+heatmap.2(t(meningitis_norm.data1), 
+          RowSideColors = mycolhc, 
+          Rowv = as.dendrogram(hr), 
+          Colv = as.dendrogram(hc), 
+          col = mycol,
+          density.info = "none", 
+          trace = "none", 
+          dendrogram = "both", 
+          scale = "row",
+          hclustfun=function(d) hclust(d,method="average"),
+          labRow = TRUE)
+```
+
+
+Semi-supervised clustering
+
+```{r meningitis_1way_cluster}
+
+heatmap.2(t(meningitis_norm.data1), 
+          RowSideColors = mycolhc, 
+          Rowv = as.dendrogram(hr), 
+          Colv = FALSE, 
+          col = mycol,
+          density.info = "none", 
+          trace = "none", 
+          dendrogram = "both", 
+          scale = "row",
+          hclustfun=function(d) hclust(d,method="average"),
+          labRow = TRUE)
+
+```
+
+#Data analysis
+First step should be univariate hypothesis testing with multiple comparison correction - this example using Smyth's moderated t-test with Storey's q-value method to control the FDR. Size of effect reported typically as fold change or in this case cohen's D.
+
+```{r }
+
+design.mtrx <- cbind(rep(1,length(Group)), (as.matrix(as.numeric(Group$Group))))
+data.transposed <- as.matrix(t(meningitis_norm.data1))
+fit <- lmFit(data.transposed,design=design.mtrx,method="robust",maxit=1024)
+fit <- eBayes(fit,robust=TRUE)
+qval <- (qvalue(fit$p.value[,2],pi0.method="bootstrap"))$qvalues
+fx.size <- apply(meningitis_norm.data1,2,
+                 function(d,f) cohen.d(d,f)$estimate,f=factor(Group$Group))
+sig.peptides <- names(qval[qval < 0.05]) # FDR < 5%
+n.sig.peptides <- length(sig.peptides) # number of significant peptides
+n.sig.peptides
+peptide.class <- as.numeric(colnames(meningitis_norm.data1) %in% sig.peptides)
+```
+
+t-test assumes that errors are normally distributed. Check if this assumption is correct by looking at distribution of the residuals. Options are to either studentize the per-protein residuals, pool them all and compare the resulting distribution with a normal distribution via a Q-Q plot or to look at the skewness and kurtosis distributions of the per-peptide residuals:
+
+```{r meningitis_QQplot}
+# pooled studentized residuals approach
+fit.residuals <- residuals(fit,data.transposed)
+fit.residuals.student <- as.vector(scale(fit.residuals))
+qqnorm(fit.residuals.student)
+abline(0,1)
+```
+
+# skewness/kurtosis approach
+
+```{r meningitis_skew_kurtosis}
+set.seed(1) # make it reproducible
+skew2 <- function(x) skewness(x,type=2)
+kurt2 <- function(x) kurtosis(x,type=2)
+normal.variates <-
+  matrix(0,ncol=ncol(fit.residuals),nrow=nrow(fit.residuals))
+for (i in 1:nrow(fit.residuals)) normal.variates[i,] <-
+  rnorm(ncol(fit.residuals),0,1)
+normal.skew <- apply(normal.variates,1,skew2)
+normal.kurt <- apply(normal.variates,1,kurt2)
+residual.skew <- apply(fit.residuals,1,skew2)
+residual.kurt <- apply(fit.residuals,1,kurt2)
+plot(NA,xlab="Skewness",ylab="Excess kurtosis",
+     xlim=c(min(c(normal.skew,residual.skew)),max(c(normal.skew,residual.skew))),
+     ylim=c(min(c(normal.kurt,residual.kurt)),max(c(normal.kurt,residual.kurt))))
+points(normal.skew,normal.kurt,pch=".",cex=5,col="grey")
+abline(v=mean(normal.skew),col="grey")
+abline(h=mean(normal.kurt),col="grey")
+points(residual.skew,residual.kurt,pch=".",cex=5)
+abline(v=mean(residual.skew))
+abline(h=mean(residual.kurt))
+```
+
+Both plots suggest that the distribution of the residuals is approximately normal, which supports the application of statistical tests that assume errors to be normally distributed.
+
+The results of univariate hypothesis testing can be visualized using a volcano plot:
+
+```{r meningitis_basic_volcano}
+peptide.colours <-
+  as.numeric(colnames(meningitis_norm.data1) %in% names(qval[qval < 0.05])) +
+  1 + peptide.class
+plot(fx.size,-log(qval)/log(10),col=peptide.colours,
+     xlab="Effect size (Cohen's d)",ylab="Significance (-log10(q-value))",
+     pch=0.1,cex=0.3)
+legend("top",c("FDR > 5%","FDR < 5%","FDR < 1%"),col=1:3,pch=15)
+```
+
+Compile results into dataframe and save as .csv
+
+```{r}
+univariate.results <-
+  data.frame(peptide.name=colnames(meningitis_norm.data1),p.value=fit$p.value[,2],
+             q.value=qval,effect.size=fx.size,significant=peptide.class)
+
+univariate.results$diffexpressed <- "NO"
+# if CohenD > 0.6 and pvalue < 0.05, set as "UP" 
+univariate.results$diffexpressed[univariate.results$effect.size > 0.5 & univariate.results$q.value < 0.05] <- "UP"
+# if CohenD < -0.6 and pvalue < 0.05, set as "DOWN"
+univariate.results$diffexpressed[univariate.results$effect.size < -0.5 & univariate.results$q.value < 0.05] <- "DOWN"
+univariate.results$label <- NA
+univariate.results$label[univariate.results$diffexpressed != "NO"] <- univariate.results$peptide.name[univariate.results$diffexpressed != "NO"]
+
+write.csv(univariate.results,"univariate_results_filtered.csv")
+
+```
+
+Alternate volcano plot generated in ggplot package
+
+```{r meningitis_volcano}
+
+vol_col <- c("#4575B4", "grey60", "#D73027")
+
+ggplot(data=univariate.results, aes(x=effect.size, y=-log10(q.value), col=diffexpressed, label=label))+ 
+  geom_point() + 
+  scale_color_manual(values = c("#4575B4", "grey60", "#D73027"), name = "Expression Level",
+                    labels = c("Down-regulated\n(q\u22640.05)\n", "Unchanged\n(q>0.05)\n", "Up-regulated\n(q\u22640.05)"))+
+  geom_vline(xintercept=c(-0.5, 0.5), col="red") +
+  geom_hline(yintercept=-log10(0.05), col="red")+
+  xlab("Effect Size (Cohen's d)")
+
+```
+
+Volcano plot with top 20 up and down-regulated proteins annotated
+
+```{r meningitis_volcano_annotated}
+
+top <- 20
+top_genes <- bind_rows(
+  univariate.results %>% 
+    filter(diffexpressed == 'UP') %>% 
+    arrange(desc(effect.size), desc(abs(q.value))) %>% 
+    head(top),
+  univariate.results %>% 
+    filter(diffexpressed == 'DOWN') %>% 
+    arrange(effect.size, desc(abs(q.value))) %>% 
+    head(top))
+
+ggplot(data=univariate.results, aes(x=effect.size, y=-log10(q.value), col=diffexpressed, label=label))+ 
+  geom_point() + 
+  scale_color_manual(values = c("#4575B4", "grey60", "#D73027"), name = "Expression Level",
+                    labels = c("Down-regulated\n(q\u22640.05)\n", "Unchanged\n(q>0.05)\n", "Up-regulated\n(q\u22640.05)"))+
+  geom_label_repel(data = top_genes,
+                   mapping = aes(x=effect.size, y= -log10(q.value), label = peptide.name),
+                   size = 2, show.legend = "none", max.overlaps = 100)+
+  geom_vline(xintercept=c(-0.5, 0.5), col="red") +
+  geom_hline(yintercept=-log10(0.05), col="red")+
+  xlab("Effect Size (Cohen's d)")
+
+```
+
+
+Need to generate/convert geneIDs from peptide symbol. 
+
+```{r}
+peptide_symbol <- base::as.vector(meningitis_data [,1])
+peptide_symbol[1:5]
+
+```
+
+```{r}
+
+geneIDs <- ensembldb::select(EnsDb.Hsapiens.v79, keys= UniprotFilter(peptide_symbol),
+keytype = "SYMBOL", columns = c("SYMBOL", "GENEID"))
+
+Unique_geneIDs <- geneIDs %>% distinct(SYMBOL, .keep_all = TRUE)
+Unique_geneIDs <- dplyr::rename(Unique_geneIDs, 'Gene_Name'='SYMBOL')
+
+meningitis_Age_Data <- meningitis_data %>% dplyr::rename(UNIPROTID = Protein_ID)
+
+meningitis_data1 <- inner_join(Unique_geneIDs, meningitis_Age_Data)
+meningitis_data <- meningitis_data1
+
+write_csv(meningitis_data, 'meningitis_GENID.csv')
+```
+
+```{r }
+  meningitis_phenotype <- read.csv('meningitis_phenotype_final.csv', row.names = 1, 
+                      header = T)
+```
+
+
+```{r }
+
+cols <- colorRampPalette(c("#4575B4", "#D73027"))(32)
+
+```
+
+Convert counts to a differentially expressed genes list 
+(DGEList - EdgeR function)
+
+```{r }
+data_dge <- DGEList(meningitis_data[ ,4:ncol(meningitis_data)])
+rownames(data_dge[["counts"]]) <-meningitis_data$GENEID
+
+```
+
+2nd element in DGEList is samples object - a dataframe containing data on 
+samples
+
+```{r }
+
+samp_groups <- as.factor(meningitis_phenotype$Group)
+data_dge[["samples"]]$group <- samp_groups
+
+```
+
+
+Further normalisation step - in EdgeR this is with
+trimmed mean of M values (TMM)
+
+
+```{r meningitis_TMMnormalised_boxplot}
+norm_data_dge <- calcNormFactors(data_dge, method = "TMM")
+norm_cpm <- cpm(norm_data_dge, normalized.lib.sizes = TRUE)
+norm_log_cpm <- cpm(norm_data_dge, log = TRUE, normalized.lib.sizes = TRUE)
+log_data_dge <- cpm(data_dge, log = TRUE, prior.count = 3)
+
+boxplot(norm_log_cpm, col = boxplot_cols, main = "TMM Normalised", outline = FALSE)
+legend("topleft", legend=c("BM", "NAD"),fill=c("#F46D43", "#74ADD1"))
+
+```
+
+Testing for differential expression - test for statistical differences between
+control and case samples - in this setting NAD and BM cases. 
+
+```{r meningitis_voom_mean_variance_trend}
+design <- model.matrix(~0 + group, data = data_dge[["samples"]])
+colnames(design) <- gsub("group", "", colnames(design))
+voom_data <-voom(norm_data_dge, design, plot = TRUE)
+
+voom_fit <- lmFit(object = voom_data, design = design)
+
+cont.matrix <- makeContrasts(BMvsNAD = BM - NAD, levels = design)
+
+voom_fit <- contrasts.fit(fit = voom_fit, contrasts = cont.matrix)
+
+voom_fit <- eBayes(voom_fit)
+```
+
+plotSA (sigma Vs Alpha)This plot is used to check the mean-variance relationship of the expression data, after fitting a linear model. A scatterplot of residual-variances vs average log-expression is created. 
+
+```{r meningitis_SAplot}
+plotSA(voom_fit)
+```
+
+Use topTable to display differentially expressed genes (DEGs).
+
+```{r echo=FALSE}
+voom_tt <- topTable(voom_fit, number = Inf)
+listMarts()
+ensembl=useMart("ENSEMBL_MART_ENSEMBL")
+list_of_datasets <- listDatasets(ensembl)
+ensembl <- useDataset("hsapiens_gene_ensembl", mart = ensembl)
+list_of_filters <- listFilters(ensembl)
+list_of_filters[grep("entr", list_of_filters$names),]
+filter_type <- "ensembl_gene_id"
+listAttributes(ensembl)[grep("", listAttributes(ensembl)),]
+attribute_names <- c('ensembl_gene_id', 'external_gene_name', 'description')
+filter_values <- rownames(voom_tt)
+annot <- getBM(attributes=attribute_names,
+               filters = filter_type,
+               values = filter_values,
+               mart = ensembl)
+
+voom_tt <- voom_tt %>% rownames_to_column(var = "Ensembl_id")
+voom_tt <- voom_tt %>% inner_join(annot, by = c("Ensembl_id" = "ensembl_gene_id"))
+
+write.csv(voom_tt, 'meningitis_summary_cluster_analysis_filtered.csv')
+```
+
+Plot heatmap of significant genes  that demonstrates clear separation between 
+groups.
+
+```{r meningitis_DEG_heatmap}
+
+heatmap_signif_cpm <- norm_cpm[rownames(norm_cpm) %in% voom_tt$Ensembl_id,]
+heatmap_signif_cpm <- heatmap_signif_cpm %>% as.data.frame() %>%
+  rownames_to_column(var = "Ensembl_id") %>%
+  inner_join(voom_tt[,c(1,8:9)]) %>%
+  column_to_rownames(var = "external_gene_name")
+mycol <- colorpanel(75, "#4575B4", "grey97", "#D73027")
+heatmap.2(as.matrix(heatmap_signif_cpm[,-c(1,34)]),
+          Rowv = T, Colv = T,
+          trace="none",
+          dendrogram = "column",
+          col=mycol,
+          margins=c(7,10),
+          scale = "row", cexRow = 0.5,cexCol = 0.5, 
+          hclustfun=function(d) hclust(d,method="average"))
+```
+Show upregulated genes only
+
+```{r meningitis_upreg_DEG_heatmap}
+meningitis_Upreg <- dplyr::filter(voom_tt, logFC >= 1)
+
+
+heatmap_signif_cpm <- norm_cpm[rownames(norm_cpm) %in% meningitis_Upreg$Ensembl_id,]
+heatmap_signif_cpm <- heatmap_signif_cpm %>% as.data.frame() %>%
+  rownames_to_column(var = "Ensembl_id") %>%
+  inner_join(meningitis_Upreg[,c(1,8:9)]) %>%
+  column_to_rownames(var = "external_gene_name")
+heatmap.2(as.matrix(heatmap_signif_cpm[,-c(1,34)]),
+          Rowv = T, Colv = T,
+          trace="none",
+          dendrogram = "column",
+          col=mycol,
+          margins=c(7,10),
+          scale = "row", cexRow = 0.5, cexCol = 0.5,
+          hclustfun=function(d) hclust(d,method="average"))
+```
+
+Use cluster profiler to get demonstration of the biological functions represented 
+in the differentially expressed genes
+First enquiring GO biological process terms:
+
+```{r meningitis_GOtermsBP_DEG_barplot}
+
+Cluster_GO <- enrichGO(voom_tt$Ensembl_id,
+                       OrgDb = org.Hs.eg.db,
+                       ont = "BP",
+                       pvalueCutoff = 0.05,
+                       keyType = "ENSEMBL",
+                       readable = TRUE)
+
+Cluster_upreg_GO <- enrichGO(meningitis_Upreg$Ensembl_id,
+                                           OrgDb = org.Hs.eg.db,
+                                          ont = 'BP',
+                                           pvalueCutoff = 0.05,
+                                           keyType = "ENSEMBL",
+                                           readable = TRUE)
+
+```
+Dotplot
+
+```{r meningitis_GOtermsBP_DEG_dotplot}
+dotplot(Cluster_GO, showCategory = c( "killing of cells of another organism", "humoral immune response", "antimicrobial humoral response", "defense response to bacterium", "complement activation", "neutrophil mediated immunity", "neutrophil-mediated killing of bacterium", "neutrophil mediated cytotoxicity", "acute inflammatory response"), font.size = 10, color="qvalue")
+
+```
+
+Upregulated proteins only
+
+```{r meningitis_GOtermsBP_Upreg_DEG_dotplot}
+dotplot(Cluster_upreg_GO, showCategory = 30, font.size = 8)
+```
+
+
+Next using KEGG database:
+
+```{r }
+
+voom_tt <- topTable(voom_fit, number = Inf)
+attribute_names2 <- c("ensembl_gene_id", "external_gene_name", "description", "entrezgene_id")
+filter_type <- "ensembl_gene_id"
+filter_values <- rownames(voom_tt)
+annot2 <- getBM(attributes=attribute_names2, filters = filter_type, values = filter_values, mart = ensembl)
+voom_tt2 <- voom_tt %>% rownames_to_column(var = "Ensembl_id")
+voom_tt2 <- voom_tt2 %>% inner_join(annot2, by = c("Ensembl_id" = "ensembl_gene_id"))
+Upreg2 = filter(voom_tt2, logFC >= 1)
+
+EnrichKEGG = enrichKEGG(voom_tt2$entrezgene_id, organism = "hsa",keyType = "ncbi-geneid", qvalueCutoff = 0.05, use_internal_data = FALSE)
+
+```
+Dotplot
+
+```{r meningitis_KEGG_dotplot}
+
+dotplot(EnrichKEGG, x="GeneRatio", showCategory = c("Complement and coagulation cascades", "Staphylococcus aureus infection", "Neutrophil extracellular trap formation", "Leukocyte transendothelial migration") , font.size = 10, color="qvalue")
+
+```
+
+Upregulated proteins only
+
+```{r meningitis_KEGG_upreg_dotplot}
+EnrichKEGG_Upreg = enrichKEGG(Upreg2$entrezgene_id, organism = "hsa",keyType = "ncbi-geneid", qvalueCutoff = 0.05, use_internal_data = TRUE)
+
+dotplot(EnrichKEGG_Upreg, x="GeneRatio", showCategory = 30, font.size = 8, color="qvalue", orderBy ="x", title = "KEGG")
+```
+
+
+
+Selected upregulated GO pathways displayed along with associated proteins as category network plot: 
+
+```{r meningitis_GOterms_Upreg_cnetplot }
+
+geneList_meningitis <- voom_tt2[,2]
+names(geneList_meningitis) <- as.character(voom_tt2[,8])
+
+
+GO_meningitis <- setReadable(Cluster_GO, 'org.Hs.eg.db', 'ENTREZID')
+
+GO_meningitis_Upreg_x <- setReadable(Cluster_upreg_GO, 'org.Hs.eg.db', 'ENTREZID')
+cnetplot(GO_meningitis_Upreg_x,  showCategory = c( "killing of cells of another organism", "humoral immune response", "antimicrobial humoral response", "defense response to bacterium", "complement activation", "neutrophil mediated immunity", "neutrophil-mediated killing of bacterium"), foldChange = geneList_meningitis, categorySize = "qvalue", cex_label_category = 0.8, cex_label_gene = 0.5)
+
+```
+
+
+```{r}
+
+meningitis_GSEA_GO_Upreg_list <- as.data.frame(Cluster_upreg_GO)%>% dplyr::select(ID, Description, GeneRatio, qvalue, Count)
+
+write.csv(meningitis_GSEA_GO_Upreg_list, 'meningitis_GSEA_GO_Upreg_list.txt', row.names = FALSE)
+
+```
+
+
+Selected upregulated GO pathways displayed along with associated proteins as heat plot:  
+
+```{r meningitis_GOterms_Upreg_pathway_heatplot}
+heatplot(GO_meningitis_Upreg_x, foldChange=geneList_meningitis, showCategory = c("killing of cells of another organism", "humoral immune response", "antimicrobial humoral response", "defense response to bacterium", "complement activation", "neutrophil mediated immunity", "neutrophil-mediated killing of bacterium", "neutrophil mediated cytotoxicity", "acute inflammatory response"))+ theme(axis.text.x = element_text(size = 8), axis.text.y = element_text(size = 10))+ theme (plot.title = element_text(size=12, face = "bold"))+ guides(fill=guide_colorbar(title = "Fold change"))
+
+
+```
+
+Using KEGG pathway GSEA
+
+```{r meningitis_KEGGterms_cnetplot}
+KEGG_meningitis <- setReadable(EnrichKEGG, 'org.Hs.eg.db', 'ENTREZID')
+
+```
+
+
+```{r}
+
+meningitis_GSEA_KEGG_list <- as.data.frame(EnrichKEGG)%>% dplyr::select(ID, Description, GeneRatio, qvalue, Count)
+
+write.csv(meningitis_GSEA_KEGG_list, 'meningitis_GSEA_KEGG_list.txt', row.names = FALSE)
+
+```
+
+
+Selected upregulated KEGG pathways displayed along with associated proteins as category network plot: 
+
+```{r meningitis_KEGGterms_Upreg_cnetplot }
+geneList_meningitis <- voom_tt2[,2]
+names(geneList_meningitis) <- as.character(voom_tt2[,8])
+
+KEGG_meningitis_Upreg_x <- setReadable(EnrichKEGG_Upreg, 'org.Hs.eg.db', 'ENTREZID')
+
+cnetplot(KEGG_meningitis_Upreg_x, showCategory = c("Complement and coagulation cascades", "Staphylococcus aureus infection", "Leukocyte transendothelial migration", "Neutrophil extracellular trap formation"), foldChange = geneList_meningitis, categorySize = "qvalue", cex_label_category = 0.8, cex_label_gene = 0.5)
+
+```
+
+
+
+Selected upregulated KEGG pathways displayed along with associated proteins as heat plot: 
+
+```{r meningitis_KEGGterms_Upreg_pathway_heatplot}
+heatplot(KEGG_meningitis_Upreg_x, foldChange=geneList_meningitis, showCategory = c("Complement and coagulation cascades", "Staphylococcus aureus infection", "Leukocyte transendothelial migration", "Neutrophil extracellular trap formation"))+ theme(axis.text.x = element_text(size = 7), axis.text.y = element_text(size = 10))+ theme (plot.title = element_text(size=12, face = "bold"))+ guides(fill=guide_colorbar(title = "Fold change"))
+```
+
