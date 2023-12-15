@@ -7,7 +7,7 @@ keep_md: yes
 ---
 
 ```{r setup, include=FALSE}
-knitr::opts_chunk$set(root.dir = '/Users/gjs12782/iCloudDrive/PhD/Oxford proteomics/Data_Analysis/Analysis_tidy/Meningitis_practice/')
+knitr::opts_chunk$set(root.dir = '<insert working directory>')
 knitr::opts_chunk$set(dev = "jpeg",
                       dpi = 300,
                       echo = TRUE,
